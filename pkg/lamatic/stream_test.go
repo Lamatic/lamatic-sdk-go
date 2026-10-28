@@ -190,6 +190,57 @@ func TestExecuteFlowTokenStreamTruncated(t *testing.T) {
 	}
 }
 
+func TestExecuteFlowTokenStreamTruncatedAfterNonFatalError(t *testing.T) {
+	client := newStreamTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		writeSSE(w,
+			"data: {\"data\":{\"executeWorkflowWithStream\":{\"status\":\"error\",\"nodeId\":\"code\",\"data\":{\"errorMsg\":\"soft fail\"}}}}\n\n",
+			"data: {\"data\":{\"executeWorkflowWithStream\":{\"status\":\"streaming\",\"nodeId\":\"llm\",\"data\":{\"generatedResponse\":\"Hi\"}}}}\n\n",
+		)
+	})
+
+	ch, err := client.ExecuteFlowTokenStream(context.Background(), "flow", nil, nil)
+	if err != nil {
+		t.Fatalf("Expected no error, got %v", err)
+	}
+	events := collect(t, ch)
+
+	// The soft error did not end the flow, so the dropped connection must
+	// still be reported.
+	if len(events) != 3 || events[2].Type != EventError || events[2].Message != "Stream ended before the flow finished" {
+		t.Fatalf("Expected error, token, then a truncation error, got %+v", events)
+	}
+}
+
+func TestExecuteFlowTokenStreamNonObjectData(t *testing.T) {
+	client := newStreamTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		writeSSE(w,
+			"data: {\"data\":{\"executeWorkflowWithStream\":{\"status\":\"error\",\"nodeId\":\"code\",\"data\":\"boom\"}}}\n\n",
+			"data: {\"data\":{\"executeWorkflowWithStream\":{\"status\":\"streaming\",\"nodeId\":\"llm\",\"data\":{\"generatedResponse\":\"Hi\"}}}}\n\n",
+			"data: {\"data\":{\"executeWorkflowWithStream\":{\"status\":\"success\",\"data\":[1,2],\"isFlowExecutionFinished\":true}}}\n\n",
+		)
+	})
+
+	ch, err := client.ExecuteFlowTokenStream(context.Background(), "flow", nil, nil)
+	if err != nil {
+		t.Fatalf("Expected no error, got %v", err)
+	}
+	events := collect(t, ch)
+
+	// A frame whose data is not an object is still delivered, just without Data.
+	want := []EventType{EventError, EventToken, EventFinal}
+	if len(events) != len(want) {
+		t.Fatalf("Expected %v, got %+v", want, events)
+	}
+	for i, w := range want {
+		if events[i].Type != w {
+			t.Fatalf("event %d: expected %s, got %+v", i, w, events[i])
+		}
+	}
+	if events[0].Message != "Workflow execution failed" || events[2].Text != "Hi" {
+		t.Errorf("Unexpected events: %+v", events)
+	}
+}
+
 func TestExecuteFlowTokenStreamCancel(t *testing.T) {
 	release := make(chan struct{})
 	client := newStreamTestClient(t, func(w http.ResponseWriter, r *http.Request) {

@@ -72,6 +72,34 @@ type RawStreamChunk struct {
 	IsFlowExecutionFinished bool   `json:"isFlowExecutionFinished,omitempty"`
 }
 
+// UnmarshalJSON decodes a frame, leaving Data or Result nil when the server
+// sends something other than a JSON object there. Failing the whole frame
+// instead would drop it, and dropping the terminal frame would end the stream
+// with a spurious truncation error.
+func (c *RawStreamChunk) UnmarshalJSON(b []byte) error {
+	type plain RawStreamChunk
+	var aux struct {
+		plain
+		Data   json.RawMessage `json:"data,omitempty"`
+		Result json.RawMessage `json:"result,omitempty"`
+	}
+	if err := json.Unmarshal(b, &aux); err != nil {
+		return err
+	}
+	*c = RawStreamChunk(aux.plain)
+	c.Data = objectOrNil(aux.Data)
+	c.Result = objectOrNil(aux.Result)
+	return nil
+}
+
+func objectOrNil(raw json.RawMessage) map[string]interface{} {
+	var m map[string]interface{}
+	if json.Unmarshal(raw, &m) != nil {
+		return nil
+	}
+	return m
+}
+
 // TokenEvent is one event of a token stream. Which fields are set depends on
 // Type:
 //
@@ -176,7 +204,9 @@ func (c *Client) ExecuteFlowTokenStream(ctx context.Context, flowId string, payl
 			send(TokenEvent{Type: EventError, Message: err.Error()})
 			return
 		}
-		if !tr.done && !tr.failed {
+		// A non-fatal error does not end the flow, so a dropped connection after
+		// one is still a truncated stream.
+		if !tr.done {
 			send(TokenEvent{Type: EventError, Message: "Stream ended before the flow finished"})
 		}
 	}()
@@ -190,8 +220,6 @@ type tokenTranslator struct {
 	textByNode map[string]string
 	// done is set once the stream is over: the flow finished, or failed fatally.
 	done bool
-	// failed is set once an error frame has been seen.
-	failed bool
 }
 
 // next returns the event for chunk, or nil if the frame carries nothing to report.
@@ -207,7 +235,6 @@ func (t *tokenTranslator) next(chunk *RawStreamChunk) *TokenEvent {
 		if msg == "" {
 			msg = "Workflow execution failed"
 		}
-		t.failed = true
 		t.done = chunk.IsFlowExecutionFinished
 		return &TokenEvent{Type: EventError, Message: msg, NodeID: nodeID, Raw: chunk}
 	}
