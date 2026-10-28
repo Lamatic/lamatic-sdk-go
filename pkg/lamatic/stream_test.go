@@ -2,6 +2,7 @@ package lamatic
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -54,9 +55,8 @@ func TestExecuteFlowTokenStream(t *testing.T) {
 	var sawAccept, sawSubscription atomic.Bool
 	client := newStreamTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		sawAccept.Store(r.Header.Get("Accept") == "text/event-stream")
-		buf := new(strings.Builder)
-		_, _ = buf.ReadFrom(r.Body)
-		sawSubscription.Store(strings.Contains(buf.String(), "subscription ExecuteWorkflowWithStream"))
+		body, _ := io.ReadAll(r.Body)
+		sawSubscription.Store(strings.Contains(string(body), "subscription ExecuteWorkflowWithStream"))
 
 		writeSSE(w,
 			": keep-alive\n\n",
