@@ -59,19 +59,13 @@ func replyServer(t *testing.T, names ...string) (*Client, *[]map[string]interfac
 	return client, &requests
 }
 
-// fastPolling makes pollInterval and pollTimeout count milliseconds.
-func fastPolling(t *testing.T) {
-	t.Helper()
-	unit := pollUnit
-	pollUnit = time.Millisecond
-	t.Cleanup(func() { pollUnit = unit })
-}
+// fast polls every 10ms and gives up after 5s.
+var fast = &PollOptions{Interval: 10 * time.Millisecond, Timeout: 5 * time.Second}
 
 func TestCheckStatusReturnsTheFlowsResult(t *testing.T) {
-	fastPolling(t)
 	client, requests := replyServer(t, "inProgress", "success")
 
-	resp, err := client.CheckStatus(context.Background(), "req-1", 10, 5000)
+	resp, err := client.CheckStatus(context.Background(), "req-1", fast)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,10 +78,9 @@ func TestCheckStatusReturnsTheFlowsResult(t *testing.T) {
 }
 
 func TestCheckStatusReportsAFailedRunsMessage(t *testing.T) {
-	fastPolling(t)
 	client, _ := replyServer(t, "failed")
 
-	resp, err := client.CheckStatus(context.Background(), "req-1", 10, 5000)
+	resp, err := client.CheckStatus(context.Background(), "req-1", fast)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,13 +90,12 @@ func TestCheckStatusReportsAFailedRunsMessage(t *testing.T) {
 }
 
 func TestCheckStatusGivesUpOnAnUnknownRequest(t *testing.T) {
-	fastPolling(t)
 	grace := notFoundGrace
 	notFoundGrace = 30 * time.Millisecond
 	t.Cleanup(func() { notFoundGrace = grace })
 	client, _ := replyServer(t, "notFound")
 
-	resp, err := client.CheckStatus(context.Background(), "req-missing", 10, 5000)
+	resp, err := client.CheckStatus(context.Background(), "req-missing", fast)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,10 +105,9 @@ func TestCheckStatusGivesUpOnAnUnknownRequest(t *testing.T) {
 }
 
 func TestCheckStatusPollsThroughNotFoundDuringTheGracePeriod(t *testing.T) {
-	fastPolling(t)
 	client, requests := replyServer(t, "notFound", "inProgress", "success")
 
-	resp, err := client.CheckStatus(context.Background(), "req-1", 10, 5000)
+	resp, err := client.CheckStatus(context.Background(), "req-1", fast)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,10 +117,9 @@ func TestCheckStatusPollsThroughNotFoundDuringTheGracePeriod(t *testing.T) {
 }
 
 func TestExecuteFlowPollPollsAQueuedRun(t *testing.T) {
-	fastPolling(t)
 	client, requests := replyServer(t, "queued", "inProgress", "success")
 
-	resp, err := client.ExecuteFlowPoll(context.Background(), "flow-1", map[string]interface{}{"sampleInput": "hi"}, 10, 5000)
+	resp, err := client.ExecuteFlowPoll(context.Background(), "flow-1", map[string]interface{}{"sampleInput": "hi"}, fast)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +133,6 @@ func TestExecuteFlowPollPollsAQueuedRun(t *testing.T) {
 }
 
 func TestExecuteFlowPollReturnsARealtimeResponseWithoutPolling(t *testing.T) {
-	fastPolling(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"data":{"executeWorkflow":{"status":"success","result":{"answer":"now","requestId":"req-2"}}}}`))
 	}))
@@ -151,7 +140,7 @@ func TestExecuteFlowPollReturnsARealtimeResponseWithoutPolling(t *testing.T) {
 	apiKey := "test-key"
 	client, _ := NewClient(Config{Endpoint: server.URL, ProjectID: "test-project", APIKey: &apiKey})
 
-	result := <-client.ExecuteFlowPollAsync(context.Background(), "flow-1", nil, 10, 5000)
+	result := <-client.ExecuteFlowPollAsync(context.Background(), "flow-1", nil, fast)
 	if result.Err != nil {
 		t.Fatal(result.Err)
 	}

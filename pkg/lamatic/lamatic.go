@@ -135,9 +135,28 @@ func (r *checkStatusRecord) message() string {
 // is queued, so a fresh request ID can briefly read as unknown.
 var notFoundGrace = 60 * time.Second
 
-// pollUnit is the unit of CheckStatus's pollInterval and pollTimeout. Tests
-// shorten it.
-var pollUnit = time.Second
+// PollOptions controls how CheckStatus and ExecuteFlowPoll wait for a run. A nil
+// *PollOptions, or a zero field, uses the default.
+type PollOptions struct {
+	// Interval is the time between status checks. Defaults to 15 seconds.
+	Interval time.Duration
+	// Timeout is how long to poll before giving up. Defaults to 15 minutes.
+	Timeout time.Duration
+}
+
+func (o *PollOptions) interval() time.Duration {
+	if o == nil || o.Interval <= 0 {
+		return 15 * time.Second
+	}
+	return o.Interval
+}
+
+func (o *PollOptions) timeout() time.Duration {
+	if o == nil || o.Timeout <= 0 {
+		return 15 * time.Minute
+	}
+	return o.Timeout
+}
 
 func (c *Client) ExecuteFlow(ctx context.Context, flowId string, payload interface{}) (*Response, error) {
 	query := `query ExecuteWorkflow(
@@ -198,19 +217,14 @@ func (c *Client) ExecuteFlowAsync(ctx context.Context, flowId string, payload in
 	return out
 }
 
-func (c *Client) CheckStatus(ctx context.Context, requestId string, pollInterval int, pollTimeout int) (*Response, error) {
-	if pollInterval <= 0 {
-		pollInterval = 15
-	}
-	if pollTimeout <= 0 {
-		pollTimeout = 900
-	}
-
+// CheckStatus polls a request until its run finishes, opts.Timeout passes, or
+// ctx is done.
+func (c *Client) CheckStatus(ctx context.Context, requestId string, opts *PollOptions) (*Response, error) {
 	start := time.Now()
-	timeoutCtx, cancel := context.WithTimeout(ctx, time.Duration(pollTimeout)*pollUnit)
+	timeoutCtx, cancel := context.WithTimeout(ctx, opts.timeout())
 	defer cancel()
 
-	ticker := time.NewTicker(time.Duration(pollInterval) * pollUnit)
+	ticker := time.NewTicker(opts.interval())
 	defer ticker.Stop()
 
 	query := `query CheckStatus(
@@ -294,11 +308,11 @@ func (c *Client) CheckStatus(ctx context.Context, requestId string, pollInterval
 
 // CheckStatusAsync runs CheckStatus in the background and reports the result on the
 // returned channel, which is closed after a single value is sent.
-func (c *Client) CheckStatusAsync(ctx context.Context, requestId string, pollInterval int, pollTimeout int) <-chan AsyncResult {
+func (c *Client) CheckStatusAsync(ctx context.Context, requestId string, opts *PollOptions) <-chan AsyncResult {
 	out := make(chan AsyncResult, 1)
 	go func() {
 		defer close(out)
-		resp, err := c.CheckStatus(ctx, requestId, pollInterval, pollTimeout)
+		resp, err := c.CheckStatus(ctx, requestId, opts)
 		out <- AsyncResult{Response: resp, Err: err}
 	}()
 	return out
@@ -306,24 +320,24 @@ func (c *Client) CheckStatusAsync(ctx context.Context, requestId string, pollInt
 
 // ExecuteFlowPoll executes a flow and, if it runs asynchronously, polls with
 // CheckStatus until it finishes. A realtime flow's response is returned as is.
-func (c *Client) ExecuteFlowPoll(ctx context.Context, flowId string, payload interface{}, pollInterval int, pollTimeout int) (*Response, error) {
+func (c *Client) ExecuteFlowPoll(ctx context.Context, flowId string, payload interface{}, opts *PollOptions) (*Response, error) {
 	resp, err := c.ExecuteFlow(ctx, flowId, payload)
 	if err != nil {
 		return nil, err
 	}
 	if requestId, ok := queuedRequestId(resp); ok {
-		return c.CheckStatus(ctx, requestId, pollInterval, pollTimeout)
+		return c.CheckStatus(ctx, requestId, opts)
 	}
 	return resp, nil
 }
 
 // ExecuteFlowPollAsync runs ExecuteFlowPoll in the background and reports the result
 // on the returned channel, which is closed after a single value is sent.
-func (c *Client) ExecuteFlowPollAsync(ctx context.Context, flowId string, payload interface{}, pollInterval int, pollTimeout int) <-chan AsyncResult {
+func (c *Client) ExecuteFlowPollAsync(ctx context.Context, flowId string, payload interface{}, opts *PollOptions) <-chan AsyncResult {
 	out := make(chan AsyncResult, 1)
 	go func() {
 		defer close(out)
-		resp, err := c.ExecuteFlowPoll(ctx, flowId, payload, pollInterval, pollTimeout)
+		resp, err := c.ExecuteFlowPoll(ctx, flowId, payload, opts)
 		out <- AsyncResult{Response: resp, Err: err}
 	}()
 	return out

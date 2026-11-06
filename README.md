@@ -57,8 +57,10 @@ A flow whose API trigger is set to run asynchronously answers at once with only 
 `ExecuteFlowPoll` runs a flow and, if it was queued, polls until it finishes. A realtime flow's response comes back unchanged, so it is safe to use for any flow. `ExecuteFlowPollAsync` reports the result on a channel instead.
 
 ```go
-// Check every 5 seconds, give up after 300.
-resp, err := client.ExecuteFlowPoll(ctx, "your-flow-id", payload, 5, 300)
+resp, err := client.ExecuteFlowPoll(ctx, "your-flow-id", payload, &lamatic.PollOptions{
+	Interval: 5 * time.Second, // default 15s
+	Timeout:  5 * time.Minute, // default 15m
+})
 if err != nil {
 	return err
 }
@@ -69,12 +71,12 @@ if resp.Status == lamatic.StatusSuccess {
 }
 ```
 
-To poll a request ID you already hold, use `CheckStatus(ctx, requestId, pollInterval, pollTimeout)` or `CheckStatusAsync`. They return the same `Response`:
+To poll a request ID you already hold, use `CheckStatus(ctx, requestId, opts)` or `CheckStatusAsync`. Pass `nil` options for the defaults. They return the same `Response`:
 
 - `success`: `Result` is the flow's output, the same shape a realtime run returns.
 - `failed`: `Message` is the run's error, and `Result["failedNode"]` names the node that failed.
 - `error` with `StatusCode` 404: the request ID was still unknown after 60 seconds of polling.
-- `error` with `StatusCode` 408: the run had not finished when `pollTimeout` ran out. It may still finish later.
+- `error` with `StatusCode` 408: the run had not finished when `Timeout` ran out. It may still finish later.
 
 ## Token Streaming
 
