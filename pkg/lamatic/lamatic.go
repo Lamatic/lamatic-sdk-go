@@ -90,8 +90,54 @@ type executeWorkflowData struct {
 }
 
 type checkStatusData struct {
-	CheckStatus executeResponse `json:"checkStatus"`
+	CheckStatus checkStatusRecord `json:"checkStatus"`
 }
+
+// checkStatusRecord is what the checkStatus query returns: a JSON scalar
+// holding the run's log record. The flow's result sits at data.output.result,
+// and a failed run's message at data.output.result.errorMsg.
+type checkStatusRecord struct {
+	Status Status `json:"status"`
+	Data   *struct {
+		Output *struct {
+			Result map[string]interface{} `json:"result"`
+		} `json:"output"`
+	} `json:"data"`
+	Result  map[string]interface{} `json:"result"`
+	Error   string                 `json:"error"`
+	Message string                 `json:"message"`
+}
+
+// result returns the flow's result, falling back to a top-level result field.
+func (r *checkStatusRecord) result() map[string]interface{} {
+	if r.Data != nil && r.Data.Output != nil {
+		return r.Data.Output.Result
+	}
+	return r.Result
+}
+
+// message returns the error message of a failed run.
+func (r *checkStatusRecord) message() string {
+	if msg, ok := r.result()["errorMsg"].(string); ok && msg != "" {
+		return msg
+	}
+	if r.Error != "" {
+		return r.Error
+	}
+	if r.Message != "" {
+		return r.Message
+	}
+	return "Workflow execution failed"
+}
+
+// notFoundGrace is how long CheckStatus keeps polling a request reported as
+// "not-found". A run's record reaches the status store a moment after the run
+// is queued, so a fresh request ID can briefly read as unknown.
+var notFoundGrace = 60 * time.Second
+
+// pollUnit is the unit of CheckStatus's pollInterval and pollTimeout. Tests
+// shorten it.
+var pollUnit = time.Second
 
 func (c *Client) ExecuteFlow(ctx context.Context, flowId string, payload interface{}) (*Response, error) {
 	query := `query ExecuteWorkflow(
@@ -160,10 +206,11 @@ func (c *Client) CheckStatus(ctx context.Context, requestId string, pollInterval
 		pollTimeout = 900
 	}
 
-	timeoutCtx, cancel := context.WithTimeout(ctx, time.Duration(pollTimeout)*time.Second)
+	start := time.Now()
+	timeoutCtx, cancel := context.WithTimeout(ctx, time.Duration(pollTimeout)*pollUnit)
 	defer cancel()
 
-	ticker := time.NewTicker(time.Duration(pollInterval) * time.Second)
+	ticker := time.NewTicker(time.Duration(pollInterval) * pollUnit)
 	defer ticker.Stop()
 
 	query := `query CheckStatus(
@@ -206,13 +253,30 @@ func (c *Client) CheckStatus(ctx context.Context, requestId string, pollInterval
 			return nil, err
 		}
 
-		status := data.CheckStatus.Status
-		if status == StatusSuccess || status == StatusError || status == "failed" {
+		check := &data.CheckStatus
+		switch check.Status {
+		case StatusSuccess:
 			return &Response{
-				Status:     status,
-				Result:     data.CheckStatus.Result,
+				Status:     StatusSuccess,
+				Result:     check.result(),
 				StatusCode: statusCode,
 			}, nil
+		case StatusError, "failed":
+			return &Response{
+				Status:     check.Status,
+				Result:     check.result(),
+				Message:    check.message(),
+				StatusCode: statusCode,
+			}, nil
+		case "not-found":
+			if time.Since(start) >= notFoundGrace {
+				return &Response{
+					Status:     StatusError,
+					Result:     nil,
+					Message:    fmt.Sprintf("Request %s was not found", requestId),
+					StatusCode: 404,
+				}, nil
+			}
 		}
 
 		select {
@@ -238,4 +302,41 @@ func (c *Client) CheckStatusAsync(ctx context.Context, requestId string, pollInt
 		out <- AsyncResult{Response: resp, Err: err}
 	}()
 	return out
+}
+
+// ExecuteFlowPoll executes a flow and, if it runs asynchronously, polls with
+// CheckStatus until it finishes. A realtime flow's response is returned as is.
+func (c *Client) ExecuteFlowPoll(ctx context.Context, flowId string, payload interface{}, pollInterval int, pollTimeout int) (*Response, error) {
+	resp, err := c.ExecuteFlow(ctx, flowId, payload)
+	if err != nil {
+		return nil, err
+	}
+	if requestId, ok := queuedRequestId(resp); ok {
+		return c.CheckStatus(ctx, requestId, pollInterval, pollTimeout)
+	}
+	return resp, nil
+}
+
+// ExecuteFlowPollAsync runs ExecuteFlowPoll in the background and reports the result
+// on the returned channel, which is closed after a single value is sent.
+func (c *Client) ExecuteFlowPollAsync(ctx context.Context, flowId string, payload interface{}, pollInterval int, pollTimeout int) <-chan AsyncResult {
+	out := make(chan AsyncResult, 1)
+	go func() {
+		defer close(out)
+		resp, err := c.ExecuteFlowPoll(ctx, flowId, payload, pollInterval, pollTimeout)
+		out <- AsyncResult{Response: resp, Err: err}
+	}()
+	return out
+}
+
+// queuedRequestId returns the request ID of a run that was queued rather than
+// executed. An async flow answers at once with result {requestId} and nothing
+// else; a realtime flow's result also carries requestId, but next to its own
+// fields.
+func queuedRequestId(resp *Response) (string, bool) {
+	if resp.Status != StatusSuccess || len(resp.Result) != 1 {
+		return "", false
+	}
+	requestId, ok := resp.Result["requestId"].(string)
+	return requestId, ok && requestId != ""
 }
